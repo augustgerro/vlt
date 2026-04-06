@@ -18,11 +18,17 @@ vlt "find . -name '*.log' -mtime +7 -delete"
 vlt
 ```
 
+## Examples
+![vlt Screenshot](examples/screenshot.png)
+
+Check out [EXAMPLES.md](examples/EXAMPLES.md) for a curated list of useful commands you can add to your vault.
+
 ## Dependencies
+
 To use all features of `vlt`, ensure the following are installed:
 - **Go** (1.18+) - For building the tool.
 - **fzf** - For the interactive command browser.
-- **Gemini CLI** (`gemini`) - For smart AI categorization.
+- **Gemini CLI** (`gemini`) (**Optional**) - For smart AI categorization. If not installed, `vlt` will prompt for manual input.
 - **Standard Unix Tools**: `column`, `sed`, `awk` (usually pre-installed on macOS/Linux).
 - **pbcopy** (macOS) - To support automatic clipboard copying.
 
