@@ -1,0 +1,6 @@
+# Binary
+vlt
+# Config (for dev)
+config.json
+# macOS
+.DS_Store
