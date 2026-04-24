@@ -1,5 +1,27 @@
 # Release Notes
 
+## v0.3.0
+
+### New Features
+- **Hierarchical drill-down navigation** — browse vault like a file manager:
+  `All entries → Categories → Filtered entries` with `→`/`←` arrow keys
+- **Category picker** with entry counts per category (`Kubernetes (3)`)
+- **Aligned table columns** — fixed-width fields with `│` separators for readability
+- **Preview panel** — shows Category, Description, and Command for the highlighted entry
+- **Delete entries** — `Ctrl-D` removes selected entry from vault
+- **Contextual UI** — border label shows breadcrumb (`🔐 Vault › Kubernetes`),
+  header hints change per navigation level
+- **Cursor memory** — returning from a category keeps the cursor on that category
+
+### Architecture
+- Replaced fragile fzf `--bind` shell actions with `--expect` + Go event loop
+  (state machine pattern) — eliminates all shell escaping issues
+- fzf is used purely as a rendering/selection engine; all logic stays in Go
+
+### Bug Fixes
+- **Fixed commands with `|` being truncated** — `parseVault` now rejoins pipe-containing commands
+- **Fixed delete not matching pipe commands** — tries both escaped and unescaped variants
+
 ## v0.2.0
 
 ### Breaking Changes
