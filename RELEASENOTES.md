@@ -1,5 +1,14 @@
 # Release Notes
 
+## v0.3.1
+
+### New Features
+- **Edit entries with `Ctrl-E`** — opens selected entry in `$EDITOR` (Unix-way, like `git commit` or `kubectl edit`)
+  - Temp file with editable `Category`, `Description`, `Command` fields
+  - Vault updated in-place; no write if nothing changed
+  - Works in both full-list and filtered views
+- **Smart editor detection** — `$EDITOR` → `$VISUAL` → `nvim` → `vim` → `nano` → `vi`
+
 ## v0.3.0
 
 ### New Features
