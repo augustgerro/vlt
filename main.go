@@ -384,7 +384,7 @@ func editEntry(vaultPath, fzfLine string) {
 		editor = os.Getenv("VISUAL")
 	}
 	if editor == "" {
-		for _, e := range []string{"nano", "vi", "vim"} {
+		for _, e := range []string{"nvim", "vim", "nano", "vi"} {
 			if isCommandAvailable(e) {
 				editor = e
 				break
