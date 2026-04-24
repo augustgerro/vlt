@@ -47,6 +47,36 @@ func loadConfig() (Config, error) {
 	return conf, nil
 }
 
+func starsPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "vlt", "stars")
+}
+
+func loadStars() map[string]bool {
+	stars := map[string]bool{}
+	data, err := os.ReadFile(starsPath())
+	if err != nil {
+		return stars
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			stars[line] = true
+		}
+	}
+	return stars
+}
+
+func saveStars(stars map[string]bool) {
+	path := starsPath()
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
+	var lines []string
+	for cmd := range stars {
+		lines = append(lines, cmd)
+	}
+	_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
 func parseVault(vaultPath string) ([]VaultEntry, error) {
 	data, err := os.ReadFile(vaultPath)
 	if err != nil {
@@ -127,6 +157,7 @@ Options:
 Browse Hotkeys:
   →/Ctrl-F   Navigate to categories
   ←          Navigate back
+  Ctrl-S     Toggle star ⭐ on selected entry
   Ctrl-E     Edit selected entry ($EDITOR)
   Ctrl-D     Delete selected entry
   ↵           Copy selected command to clipboard
@@ -483,12 +514,19 @@ func showVault(vaultPath string) {
 	// State machine: "all" → "categories" → "filtered"
 	state := "all"
 	catFilter := ""
+	startPos := 0
 
 	for {
 		switch state {
 		case "all":
-			action, selected := runVaultFzf(vaultPath, "")
+			action, selected, pos := runVaultFzf(vaultPath, "", startPos)
+			startPos = 0
 			switch action {
+			case "ctrl-s":
+				if selected != "" {
+					toggleStar(selected)
+					startPos = pos
+				}
 			case "ctrl-d":
 				if selected != "" {
 					deleteEntry(vaultPath, selected)
@@ -523,8 +561,14 @@ func showVault(vaultPath string) {
 			}
 
 		case "filtered":
-			action, selected := runVaultFzf(vaultPath, catFilter)
+			action, selected, pos := runVaultFzf(vaultPath, catFilter, startPos)
+			startPos = 0
 			switch action {
+			case "ctrl-s":
+				if selected != "" {
+					toggleStar(selected)
+					startPos = pos
+				}
 			case "ctrl-d":
 				if selected != "" {
 					deleteEntry(vaultPath, selected)
@@ -549,7 +593,23 @@ func showVault(vaultPath string) {
 	}
 }
 
-func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
+func toggleStar(fzfLine string) {
+	sep := "│"
+	parts := strings.Split(fzfLine, sep)
+	if len(parts) < 2 {
+		return
+	}
+	command := strings.TrimSpace(parts[len(parts)-1])
+	stars := loadStars()
+	if stars[command] {
+		delete(stars, command)
+	} else {
+		stars[command] = true
+	}
+	saveStars(stars)
+}
+
+func runVaultFzf(vaultPath, catFilter string, startPos int) (action, selected string, selPos int) {
 	entries, err := parseVault(vaultPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading vault: %v\n", err)
@@ -561,8 +621,13 @@ func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
 		os.Exit(0)
 	}
 
+	stars := loadStars()
+
 	maxCat, maxDesc := 0, 0
 	for _, e := range entries {
+		if catFilter != "" && e.Category != catFilter {
+			continue
+		}
 		if len(e.Category) > maxCat {
 			maxCat = len(e.Category)
 		}
@@ -577,12 +642,16 @@ func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
 		if catFilter != "" && e.Category != catFilter {
 			continue
 		}
+		star := "  "
+		if stars[e.Command] {
+			star = "⭐"
+		}
 		if catFilter != "" {
-			fzfLines = append(fzfLines, fmt.Sprintf(" %-*s %s %s",
-				maxDesc, e.Description, sep, e.Command))
+			fzfLines = append(fzfLines, fmt.Sprintf("%s %-*s %s %s",
+				star, maxDesc, e.Description, sep, e.Command))
 		} else {
-			fzfLines = append(fzfLines, fmt.Sprintf(" %-*s %s %-*s %s %s",
-				maxCat, e.Category, sep,
+			fzfLines = append(fzfLines, fmt.Sprintf("%s %-*s %s %-*s %s %s",
+				star, maxCat, e.Category, sep,
 				maxDesc, e.Description, sep,
 				e.Command))
 		}
@@ -590,14 +659,14 @@ func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
 
 	if len(fzfLines) == 0 {
 		fmt.Println("No entries in this category.")
-		return "esc", ""
+		return "esc", "", 0
 	}
 
 	var header string
 	if catFilter != "" {
-		header = " \033[33m←\033[0m Back  \033[33mctrl-e\033[0m Edit  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
+		header = " \033[33m←\033[0m Back  \033[33mctrl-s\033[0m Star  \033[33mctrl-e\033[0m Edit  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
 	} else {
-		header = " \033[33m→\033[0m Categories  \033[33mctrl-e\033[0m Edit  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
+		header = " \033[33m→\033[0m Categories  \033[33mctrl-s\033[0m Star  \033[33mctrl-e\033[0m Edit  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
 	}
 
 	preview := `echo {} | awk -F '│' '{for(i=1;i<=NF;i++) gsub(/^[ \t]+|[ \t]+$/,"",$i); if(NF>=3) printf "\033[1;36m📂 Category:\033[0m    %s\n\033[1;33m📝 Description:\033[0m %s\n\033[1;32m⚡ Command:\033[0m     %s\n",$1,$2,$3; else printf "\033[1;33m📝 Description:\033[0m %s\n\033[1;32m⚡ Command:\033[0m     %s\n",$1,$2}'`
@@ -619,7 +688,10 @@ func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
 		"--preview-window", "up:5:wrap",
 		"--pointer", "▶",
 		"--marker", "✓",
-		"--expect", "ctrl-d,ctrl-e,ctrl-f,right,left",
+		"--expect", "ctrl-d,ctrl-e,ctrl-s,ctrl-f,right,left",
+	}
+	if startPos > 0 {
+		fzfArgs = append(fzfArgs, "--sync", "--bind", fmt.Sprintf("start:pos(%d)", startPos))
 	}
 
 	cmd := exec.Command("fzf", fzfArgs...)
@@ -628,7 +700,7 @@ func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
 
 	out, err := cmd.Output()
 	if err != nil {
-		return "esc", ""
+		return "esc", "", 0
 	}
 
 	lines := strings.SplitN(strings.TrimRight(string(out), "\n"), "\n", 2)
@@ -638,10 +710,19 @@ func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
 		line = lines[1]
 	}
 
-	if key == "" {
-		return "enter", line
+	// Find the 1-indexed position of the selected line for cursor restoration
+	pos := 0
+	for i, fl := range fzfLines {
+		if fl == line {
+			pos = i + 1
+			break
+		}
 	}
-	return key, line
+
+	if key == "" {
+		return "enter", line, pos
+	}
+	return key, line, pos
 }
 
 func runCategoryPicker(vaultPath, highlight string) (action, picked string) {
