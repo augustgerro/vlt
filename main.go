@@ -617,6 +617,8 @@ func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
 		"--header", header,
 		"--preview", preview,
 		"--preview-window", "up:5:wrap",
+		"--pointer", "▶",
+		"--marker", "✓",
 		"--expect", "ctrl-d,ctrl-e,ctrl-f,right,left",
 	}
 
@@ -683,6 +685,8 @@ func runCategoryPicker(vaultPath, highlight string) (action, picked string) {
 		"--border", "rounded",
 		"--border-label", " 📂 Categories ",
 		"--header", header,
+		"--pointer", "▶",
+		"--marker", "✓",
 		"--expect", "right,left",
 	}
 	if highlightPos > 0 {
