@@ -15,6 +15,12 @@ type Config struct {
 	VaultPath string `json:"vault_path"`
 }
 
+type VaultEntry struct {
+	Category    string
+	Description string
+	Command     string
+}
+
 func isCommandAvailable(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
@@ -39,6 +45,54 @@ func loadConfig() (Config, error) {
 		}
 	}
 	return conf, nil
+}
+
+func parseVault(vaultPath string) ([]VaultEntry, error) {
+	data, err := os.ReadFile(vaultPath)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var entries []VaultEntry
+
+	for i, line := range lines {
+		if i < 2 {
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "|") {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		if len(parts) < 4 {
+			continue
+		}
+		cat := strings.TrimSpace(parts[1])
+		desc := strings.TrimSpace(parts[2])
+		// Command may contain unescaped | — rejoin remaining fields
+		cmd := strings.TrimSpace(strings.Join(parts[3:len(parts)-1], "|"))
+		cmd = strings.Trim(cmd, "`")
+		cmd = strings.ReplaceAll(cmd, "\\|", "|")
+
+		if cat == "" && desc == "" && cmd == "" {
+			continue
+		}
+		entries = append(entries, VaultEntry{Category: cat, Description: desc, Command: cmd})
+	}
+	return entries, nil
+}
+
+func uniqueCategories(entries []VaultEntry) []string {
+	seen := map[string]bool{}
+	var cats []string
+	for _, e := range entries {
+		if !seen[e.Category] {
+			seen[e.Category] = true
+			cats = append(cats, e.Category)
+		}
+	}
+	return cats
 }
 
 func clipboardCmd() (string, []string) {
@@ -70,6 +124,13 @@ Usage:
 Options:
   --ai, -a    Use AI to auto-categorize the command
 
+Browse Hotkeys:
+  →/Ctrl-F   Navigate to categories
+  ←          Navigate back
+  Ctrl-D     Delete selected entry
+  ↵           Copy selected command to clipboard
+  Esc         Exit
+
 Vault file: ` + conf.VaultPath + `
 
 Dependencies:
@@ -100,6 +161,34 @@ func main() {
 		}
 		f.WriteString("| Category | Description | Command |\n| :--- | :--- | :--- |\n")
 		f.Close()
+	}
+
+	// Hidden flags for CLI scripting
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "--_list":
+			catFilter := ""
+			if len(os.Args) >= 4 && os.Args[2] == "--_cat" {
+				catFilter = strings.Join(os.Args[3:], " ")
+			}
+			listEntries(conf.VaultPath, catFilter)
+			return
+		case "--_cats":
+			entries, err := parseVault(conf.VaultPath)
+			if err != nil {
+				os.Exit(1)
+			}
+			for _, cat := range uniqueCategories(entries) {
+				fmt.Println(cat)
+			}
+			return
+		case "--_delete":
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				deleteEntry(conf.VaultPath, scanner.Text())
+			}
+			return
+		}
 	}
 
 	if len(os.Args) == 1 {
@@ -191,59 +280,327 @@ func readManualInput(category, description *string) {
 	*description = strings.TrimSpace(d)
 }
 
+func listEntries(vaultPath, catFilter string) {
+	entries, err := parseVault(vaultPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading vault: %v\n", err)
+		os.Exit(1)
+	}
+
+	maxCat, maxDesc := 0, 0
+	for _, e := range entries {
+		if len(e.Category) > maxCat {
+			maxCat = len(e.Category)
+		}
+		if len(e.Description) > maxDesc {
+			maxDesc = len(e.Description)
+		}
+	}
+
+	sep := "│"
+	for _, e := range entries {
+		if catFilter != "" && e.Category != catFilter {
+			continue
+		}
+		if catFilter != "" {
+			fmt.Printf(" %-*s %s %s\n", maxDesc, e.Description, sep, e.Command)
+		} else {
+			fmt.Printf(" %-*s %s %-*s %s %s\n",
+				maxCat, e.Category, sep,
+				maxDesc, e.Description, sep,
+				e.Command)
+		}
+	}
+}
+
+func deleteEntry(vaultPath, fzfLine string) {
+	sep := "│"
+	parts := strings.Split(fzfLine, sep)
+	if len(parts) < 2 {
+		return
+	}
+	command := strings.TrimSpace(parts[len(parts)-1])
+
+	// Match vault line by command — try both escaped (\|) and unescaped (|) variants
+	vaultCmdEscaped := "`" + strings.ReplaceAll(command, "|", "\\|") + "`"
+	vaultCmdRaw := "`" + command + "`"
+
+	data, err := os.ReadFile(vaultPath)
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var result []string
+	deleted := false
+
+	for _, line := range lines {
+		if !deleted && (strings.Contains(line, vaultCmdEscaped) || strings.Contains(line, vaultCmdRaw)) {
+			deleted = true
+			continue
+		}
+		result = append(result, line)
+	}
+
+	if deleted {
+		if err := os.WriteFile(vaultPath, []byte(strings.Join(result, "\n")), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing vault: %v\n", err)
+		}
+	}
+}
+
 func showVault(vaultPath string) {
 	if !isCommandAvailable("fzf") {
 		fmt.Fprintln(os.Stderr, "Error: fzf is required but not installed. Install it: brew install fzf")
 		os.Exit(1)
 	}
 
-	data, err := os.ReadFile(vaultPath)
+	// State machine: "all" → "categories" → "filtered"
+	state := "all"
+	catFilter := ""
+
+	for {
+		switch state {
+		case "all":
+			action, selected := runVaultFzf(vaultPath, "")
+			switch action {
+			case "ctrl-d":
+				if selected != "" {
+					deleteEntry(vaultPath, selected)
+				}
+			case "ctrl-f", "right":
+				state = "categories"
+			case "enter":
+				if selected != "" {
+					copyCommand(selected)
+				}
+				return
+			default:
+				return
+			}
+
+		case "categories":
+			action, picked := runCategoryPicker(vaultPath, catFilter)
+			switch action {
+			case "right", "enter":
+				if picked != "" {
+					catFilter = picked
+					state = "filtered"
+				}
+			case "left":
+				state = "all"
+			default:
+				return
+			}
+
+		case "filtered":
+			action, selected := runVaultFzf(vaultPath, catFilter)
+			switch action {
+			case "ctrl-d":
+				if selected != "" {
+					deleteEntry(vaultPath, selected)
+				}
+			case "left":
+				state = "categories"
+			case "ctrl-f", "right":
+				state = "categories"
+			case "enter":
+				if selected != "" {
+					copyCommand(selected)
+				}
+				return
+			default:
+				return
+			}
+		}
+	}
+}
+
+func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
+	entries, err := parseVault(vaultPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading vault: %v\n", err)
 		os.Exit(1)
 	}
 
-	lines := strings.Split(string(data), "\n")
-	if len(lines) <= 2 {
+	if len(entries) == 0 {
 		fmt.Println("Vault is empty. Add commands with: vlt \"your command\"")
-		return
+		os.Exit(0)
 	}
 
-	// Feed only data rows (skip header + separator) into fzf via stdin
-	dataRows := strings.Join(lines[2:], "\n")
+	maxCat, maxDesc := 0, 0
+	for _, e := range entries {
+		if len(e.Category) > maxCat {
+			maxCat = len(e.Category)
+		}
+		if len(e.Description) > maxDesc {
+			maxDesc = len(e.Description)
+		}
+	}
+
+	sep := "│"
+	var fzfLines []string
+	for _, e := range entries {
+		if catFilter != "" && e.Category != catFilter {
+			continue
+		}
+		if catFilter != "" {
+			fzfLines = append(fzfLines, fmt.Sprintf(" %-*s %s %s",
+				maxDesc, e.Description, sep, e.Command))
+		} else {
+			fzfLines = append(fzfLines, fmt.Sprintf(" %-*s %s %-*s %s %s",
+				maxCat, e.Category, sep,
+				maxDesc, e.Description, sep,
+				e.Command))
+		}
+	}
+
+	if len(fzfLines) == 0 {
+		fmt.Println("No entries in this category.")
+		return "esc", ""
+	}
+
+	var header string
+	if catFilter != "" {
+		header = " \033[33m←\033[0m Back  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
+	} else {
+		header = " \033[33m→\033[0m Categories  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
+	}
+
+	preview := `echo {} | awk -F '│' '{for(i=1;i<=NF;i++) gsub(/^[ \t]+|[ \t]+$/,"",$i); if(NF>=3) printf "\033[1;36m📂 Category:\033[0m    %s\n\033[1;33m📝 Description:\033[0m %s\n\033[1;32m⚡ Command:\033[0m     %s\n",$1,$2,$3; else printf "\033[1;33m📝 Description:\033[0m %s\n\033[1;32m⚡ Command:\033[0m     %s\n",$1,$2}'`
+
+	borderLabel := " 🔐 Vault "
+	if catFilter != "" {
+		borderLabel = fmt.Sprintf(" 🔐 Vault › %s ", catFilter)
+	}
 
 	fzfArgs := []string{
 		"--reverse",
-		"--no-preview",
 		"--exact",
-		"--header", "ENTER to copy command, ESC to exit",
+		"--ansi",
+		"--delimiter", sep,
+		"--border", "rounded",
+		"--border-label", borderLabel,
+		"--header", header,
+		"--preview", preview,
+		"--preview-window", "up:5:wrap",
+		"--expect", "ctrl-d,ctrl-f,right,left",
 	}
+
 	cmd := exec.Command("fzf", fzfArgs...)
-	cmd.Stdin = strings.NewReader(dataRows)
+	cmd.Stdin = strings.NewReader(strings.Join(fzfLines, "\n"))
 	cmd.Stderr = os.Stderr
 
 	out, err := cmd.Output()
 	if err != nil {
-		// User pressed ESC or fzf exited with non-zero — silently exit
-		return
+		return "esc", ""
 	}
 
-	selected := strings.TrimSpace(string(out))
-	if selected == "" {
-		return
+	lines := strings.SplitN(strings.TrimRight(string(out), "\n"), "\n", 2)
+	key := strings.TrimSpace(lines[0])
+	line := ""
+	if len(lines) >= 2 {
+		line = lines[1]
 	}
 
-	// Extract command column (4th field between pipes)
-	parts := strings.Split(selected, "|")
-	if len(parts) < 4 {
-		fmt.Fprintln(os.Stderr, "Error: could not parse selected row.")
-		return
+	if key == "" {
+		return "enter", line
 	}
-	command := strings.TrimSpace(parts[3])
-	// Strip backticks
-	command = strings.Trim(command, "`")
-	// Unescape pipes
-	command = strings.ReplaceAll(command, "\\|", "|")
+	return key, line
+}
+
+func runCategoryPicker(vaultPath, highlight string) (action, picked string) {
+	entries, err := parseVault(vaultPath)
+	if err != nil {
+		return "esc", ""
+	}
+	cats := uniqueCategories(entries)
+	if len(cats) == 0 {
+		return "esc", ""
+	}
+
+	// Count entries per category
+	catCount := map[string]int{}
+	for _, e := range entries {
+		catCount[e.Category]++
+	}
+
+	// Find position of highlighted category (1-indexed for fzf pos())
+	highlightPos := 0
+	if highlight != "" {
+		for i, c := range cats {
+			if c == highlight {
+				highlightPos = i + 1
+				break
+			}
+		}
+	}
+
+	var lines []string
+	for _, c := range cats {
+		lines = append(lines, fmt.Sprintf(" %-20s (%d)", c, catCount[c]))
+	}
+
+	header := " \033[33m←\033[0m Back  \033[33m→/↵\033[0m Open  \033[33mEsc\033[0m Exit"
+
+	fzfArgs := []string{
+		"--reverse",
+		"--exact",
+		"--ansi",
+		"--border", "rounded",
+		"--border-label", " 📂 Categories ",
+		"--header", header,
+		"--expect", "right,left",
+	}
+	if highlightPos > 0 {
+		fzfArgs = append(fzfArgs, "--sync", "--bind", fmt.Sprintf("start:pos(%d)", highlightPos))
+	}
+
+	cmd := exec.Command("fzf", fzfArgs...)
+	cmd.Stdin = strings.NewReader(strings.Join(lines, "\n"))
+	cmd.Stderr = os.Stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "esc", ""
+	}
+
+	outLines := strings.SplitN(strings.TrimRight(string(out), "\n"), "\n", 2)
+	key := strings.TrimSpace(outLines[0])
+	sel := ""
+	if len(outLines) >= 2 {
+		sel = outLines[1]
+	}
+
+	// Extract category name (strip count suffix)
+	catName := ""
+	if sel != "" {
+		sel = strings.TrimSpace(sel)
+		if idx := strings.LastIndex(sel, "("); idx > 0 {
+			catName = strings.TrimSpace(sel[:idx])
+		} else {
+			catName = sel
+		}
+	}
+
+	switch key {
+	case "left":
+		return "left", ""
+	case "right":
+		return "right", catName
+	default:
+		// Enter
+		if catName != "" {
+			return "enter", catName
+		}
+		return "esc", ""
+	}
+}
+
+func copyCommand(fzfLine string) {
+	sep := "│"
+	parts := strings.Split(fzfLine, sep)
+	command := strings.TrimSpace(parts[len(parts)-1])
 
 	clipTool, clipArgs := clipboardCmd()
 	if clipTool == "" {
