@@ -127,6 +127,7 @@ Options:
 Browse Hotkeys:
   →/Ctrl-F   Navigate to categories
   ←          Navigate back
+  Ctrl-E     Edit selected entry ($EDITOR)
   Ctrl-D     Delete selected entry
   ↵           Copy selected command to clipboard
   Esc         Exit
@@ -313,6 +314,130 @@ func listEntries(vaultPath, catFilter string) {
 	}
 }
 
+func editEntry(vaultPath, fzfLine string) {
+	sep := "│"
+	parts := strings.Split(fzfLine, sep)
+	if len(parts) < 2 {
+		return
+	}
+
+	// Parse fields from the fzf display line (2 or 3 columns)
+	var origCat, origDesc, origCmd string
+	if len(parts) >= 3 {
+		origCat = strings.TrimSpace(parts[0])
+		origDesc = strings.TrimSpace(parts[1])
+		origCmd = strings.TrimSpace(parts[2])
+	} else {
+		origDesc = strings.TrimSpace(parts[0])
+		origCmd = strings.TrimSpace(parts[1])
+	}
+
+	// Locate the original vault line by command to get the real category
+	// (needed when viewing in filtered/2-col mode)
+	data, err := os.ReadFile(vaultPath)
+	if err != nil {
+		return
+	}
+	vaultLines := strings.Split(string(data), "\n")
+	matchedLine := ""
+	matchedIdx := -1
+	cmdEscaped := "`" + strings.ReplaceAll(origCmd, "|", "\\|") + "`"
+	cmdRaw := "`" + origCmd + "`"
+	for i, line := range vaultLines {
+		if strings.Contains(line, cmdEscaped) || strings.Contains(line, cmdRaw) {
+			matchedLine = line
+			matchedIdx = i
+			break
+		}
+	}
+	if matchedIdx < 0 {
+		return
+	}
+
+	// Re-parse the matched vault line to get full accurate fields
+	vParts := strings.Split(matchedLine, "|")
+	if len(vParts) >= 4 {
+		origCat = strings.TrimSpace(vParts[1])
+		origDesc = strings.TrimSpace(vParts[2])
+		origCmd = strings.TrimSpace(strings.Join(vParts[3:len(vParts)-1], "|"))
+		origCmd = strings.Trim(origCmd, "`")
+		origCmd = strings.ReplaceAll(origCmd, "\\|", "|")
+	}
+
+	// Write temp file for editor
+	tmp, err := os.CreateTemp("", "vlt-edit-*.txt")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	fmt.Fprintf(tmp, "# Edit vault entry — save and close to apply, delete all lines to cancel\n\n")
+	fmt.Fprintf(tmp, "Category:    %s\n", origCat)
+	fmt.Fprintf(tmp, "Description: %s\n", origDesc)
+	fmt.Fprintf(tmp, "Command:     %s\n", origCmd)
+	tmp.Close()
+
+	// Open $EDITOR (fallback: nano → vi)
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		for _, e := range []string{"nano", "vi", "vim"} {
+			if isCommandAvailable(e) {
+				editor = e
+				break
+			}
+		}
+	}
+	if editor == "" {
+		fmt.Fprintln(os.Stderr, "No editor found. Set $EDITOR.")
+		return
+	}
+
+	editorCmd := exec.Command(editor, tmpPath)
+	editorCmd.Stdin = os.Stdin
+	editorCmd.Stdout = os.Stdout
+	editorCmd.Stderr = os.Stderr
+	if err := editorCmd.Run(); err != nil {
+		return
+	}
+
+	// Parse edited file
+	edited, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return
+	}
+	newCat, newDesc, newCmd := origCat, origDesc, origCmd
+	for _, line := range strings.Split(string(edited), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") || line == "" {
+			continue
+		}
+		if after, ok := strings.CutPrefix(line, "Category:"); ok {
+			newCat = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(line, "Description:"); ok {
+			newDesc = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(line, "Command:"); ok {
+			newCmd = strings.TrimSpace(after)
+		}
+	}
+
+	// Nothing changed — skip write
+	if newCat == origCat && newDesc == origDesc && newCmd == origCmd {
+		return
+	}
+
+	escapedCmd := strings.ReplaceAll(newCmd, "|", "\\|")
+	newRow := fmt.Sprintf("| %s | %s | `%s` |", newCat, newDesc, escapedCmd)
+	vaultLines[matchedIdx] = newRow
+
+	if err := os.WriteFile(vaultPath, []byte(strings.Join(vaultLines, "\n")), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing vault: %v\n", err)
+	}
+}
+
 func deleteEntry(vaultPath, fzfLine string) {
 	sep := "│"
 	parts := strings.Split(fzfLine, sep)
@@ -368,6 +493,10 @@ func showVault(vaultPath string) {
 				if selected != "" {
 					deleteEntry(vaultPath, selected)
 				}
+			case "ctrl-e":
+				if selected != "" {
+					editEntry(vaultPath, selected)
+				}
 			case "ctrl-f", "right":
 				state = "categories"
 			case "enter":
@@ -399,6 +528,10 @@ func showVault(vaultPath string) {
 			case "ctrl-d":
 				if selected != "" {
 					deleteEntry(vaultPath, selected)
+				}
+			case "ctrl-e":
+				if selected != "" {
+					editEntry(vaultPath, selected)
 				}
 			case "left":
 				state = "categories"
@@ -462,9 +595,9 @@ func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
 
 	var header string
 	if catFilter != "" {
-		header = " \033[33m←\033[0m Back  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
+		header = " \033[33m←\033[0m Back  \033[33mctrl-e\033[0m Edit  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
 	} else {
-		header = " \033[33m→\033[0m Categories  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
+		header = " \033[33m→\033[0m Categories  \033[33mctrl-e\033[0m Edit  \033[33mctrl-d\033[0m Delete  \033[33m↵\033[0m Copy  \033[33mEsc\033[0m Exit"
 	}
 
 	preview := `echo {} | awk -F '│' '{for(i=1;i<=NF;i++) gsub(/^[ \t]+|[ \t]+$/,"",$i); if(NF>=3) printf "\033[1;36m📂 Category:\033[0m    %s\n\033[1;33m📝 Description:\033[0m %s\n\033[1;32m⚡ Command:\033[0m     %s\n",$1,$2,$3; else printf "\033[1;33m📝 Description:\033[0m %s\n\033[1;32m⚡ Command:\033[0m     %s\n",$1,$2}'`
@@ -484,7 +617,7 @@ func runVaultFzf(vaultPath, catFilter string) (action, selected string) {
 		"--header", header,
 		"--preview", preview,
 		"--preview-window", "up:5:wrap",
-		"--expect", "ctrl-d,ctrl-f,right,left",
+		"--expect", "ctrl-d,ctrl-e,ctrl-f,right,left",
 	}
 
 	cmd := exec.Command("fzf", fzfArgs...)
