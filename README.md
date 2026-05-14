@@ -39,7 +39,7 @@ make install
 
 ## Usage
 1. **Add a command**: `vlt "your command here"`
-2. **Add last command**: `vlt !!`
+2. **To add a last comment that you are truly proud of ✨**: `vlt !!`
 3. **Browse commands**: `vlt` (opens interactive fzf)
 
 ## Configuration
